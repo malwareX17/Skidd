@@ -22,15 +22,21 @@ Tracer.Color = getgenv().TracerColor
 Tracer.Thickness = getgenv().TracerThickness
 Tracer.Transparency = getgenv().TracerTransparency
 
+local function Notify(title, text, duration)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = title or "Notification",
+            Text = text or "",
+            Duration = duration or 1
+        })
+    end)
+end
+
 UserInputService.InputBegan:Connect(function(input, processed)
     if not processed then
         if input.KeyCode == Enum.KeyCode[getgenv().ResolveKey:upper()] then
             resolver = not resolver
-            game.StarterGui:SetCore("SendNotification", {
-                Title = tostring(resolver),
-                Text = "Resolve",
-                Duration = 0.5
-            })
+            Notify("Resolver", tostring(resolver), 0.5)
             if not resolver then
                 aiming = false
                 target = nil
@@ -130,12 +136,14 @@ game:GetService("RunService").RenderStepped:Connect(function()
     else
         Resolvedvelocity = nil
     end
-    if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-        local rootPart = target.Character.HumanoidRootPart
-        local screenPos, onScreen = camera:WorldToViewportPoint(rootPart.Position)
-        if onScreen then
-            Tracer.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
-            Tracer.To = Vector2.new(screenPos.X, screenPos.Y)
+    if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") and client.Character and client.Character:FindFirstChild("HumanoidRootPart") then
+        local targetRoot = target.Character.HumanoidRootPart
+        local myRoot = client.Character.HumanoidRootPart
+        local startPos, startVisible = camera:WorldToViewportPoint(myRoot.Position)
+        local endPos, endVisible = camera:WorldToViewportPoint(targetRoot.Position)
+        if startVisible and endVisible then
+            Tracer.From = Vector2.new(startPos.X, startPos.Y)
+            Tracer.To = Vector2.new(endPos.X, endPos.Y)
             Tracer.Visible = true
         else
             Tracer.Visible = false
@@ -177,3 +185,4 @@ game:GetService("RunService").Heartbeat:Connect(function()
         camera.CFrame = new
     end
 end)
+
