@@ -1,150 +1,139 @@
-getgenv().Prediction = 0.109
-getgenv().ResolveKey = "C" 
-getgenv().Smoothing = 0.05 
-getgenv().JumpSmoothness = 1 
-getgenv().Diameter = -0.2 
+-- // Configuration
+getgenv().Prediction = 0.109 
+getgenv().AutoPrediction = true 
 getgenv().Radius = 150 
-getgenv().TracerColor = Color3.fromRGB(255, 0, 255)
+getgenv().TracerColor = Color3.fromRGB(255, 0, 255) 
 getgenv().TracerThickness = 1.5
-getgenv().TracerTransparency = 1
 
-local resolver = false
-local silentAim = true
+-- // Prediction Table (Ping based)
+local PingTable = {
+    {Ping = 40, Prediction = 0.11},
+    {Ping = 50, Prediction = 0.12},
+    {Ping = 60, Prediction = 0.125},
+    {Ping = 70, Prediction = 0.13},
+    {Ping = 80, Prediction = 0.135},
+    {Ping = 90, Prediction = 0.14},
+    {Ping = 100, Prediction = 0.145},
+    {Ping = 120, Prediction = 0.15},
+    {Ping = 150, Prediction = 0.162},
+    {Ping = 200, Prediction = 0.176},
+    {Ping = 300, Prediction = 0.22}
+}
+
+-- // Variables
 local client = game.Players.LocalPlayer
-local camera = game.Workspace.CurrentCamera
-local Resolvedvelocity
-local target, aiming
+local camera = workspace.CurrentCamera
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
+
+-- // Platform Detection
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- // Drawing Setup
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Visible = true
+FOVCircle.Transparency = 1
+FOVCircle.Thickness = 1.5
+FOVCircle.Color = getgenv().TracerColor
+FOVCircle.Filled = false
+FOVCircle.NumSides = 64
+FOVCircle.Radius = getgenv().Radius
+FOVCircle.ZIndex = 999
 
 local Tracer = Drawing.new("Line")
 Tracer.Visible = false
 Tracer.Color = getgenv().TracerColor
 Tracer.Thickness = getgenv().TracerThickness
-Tracer.Transparency = getgenv().TracerTransparency
+Tracer.Transparency = 1
+Tracer.ZIndex = 999
 
-local function Notify(title, text, duration)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = title or "Notification",
-            Text = text or "",
-            Duration = duration or 1
-        })
-    end)
-end
-
-UserInputService.InputBegan:Connect(function(input, processed)
-    if not processed then
-        if input.KeyCode == Enum.KeyCode[getgenv().ResolveKey:upper()] then
-            resolver = not resolver
-            Notify("Resolver", tostring(resolver), 0.5)
-            if not resolver then
-                aiming = false
-                target = nil
-            end
-        end
-    end
-end)
-
-local Smoothness = 5
-local Stored = {}
-local Value = 1
-
-local recalculatedVelocity = function(player)
-    local Tick = tick()
-    Stored[Value] = {
-        pos = player.Position,
-        time = Tick,
-    }
-    Value = Value + 1
-    if Value > Smoothness then
-        Value = 1
-    end
-    local Pos = Vector3.new()
-    local Time = 0
-    for i = 1, Smoothness do
-        local Data = Stored[i]
-        if Data then
-            Pos = Pos + Data.pos
-            Time = Time + Data.time
-        end
-    end
-    if Stored[Value] then
-        local velocity = (player.Position - Stored[Value].pos) / (Tick - Stored[Value].time)
-        return velocity
+-- // Get Pointer (Mouse or Center Screen)
+local function getPointer()
+    if isMobile then
+        return Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+    else
+        return UserInputService:GetMouseLocation()
     end
 end
 
-function wallCheck(targetPosition, ignoreList)
-    ignoreList = ignoreList or {}
-    table.insert(ignoreList, game.Players.LocalPlayer.Character)
-    local HitPoint, hitPosition = workspace:FindPartOnRayWithIgnoreList(
-        Ray.new(camera.CFrame.p, (targetPosition - camera.CFrame.p).Unit * 1000),
-        ignoreList
-    )
-    return HitPoint == nil and true or (hitPosition - camera.CFrame.p).Magnitude >= (targetPosition - camera.CFrame.p).Magnitude
+-- // Wall Check
+local function isVisible(targetPart)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {client.Character, targetPart.Parent}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local result = workspace:Raycast(camera.CFrame.Position, (targetPart.Position - camera.CFrame.Position), raycastParams)
+    return result == nil
 end
 
-local function isPlayerKoed(player)
+-- // Health Check
+local function isAlive(player)
     if player and player.Character and player.Character:FindFirstChild("Humanoid") then
-        local humanoid = player.Character:FindFirstChild("Humanoid")
-        if humanoid.Health <= 1 then
-            return true
-        end
+        return player.Character.Humanoid.Health > 1
     end
     return false
 end
 
-local function lockOnToNearestPlayer()
-    local closestPlayer = nil
-    local closestDistance = getgenv().Radius
+-- // Prediction Calculation (Strictly RootPart)
+local function getCalculatedPos(target)
+    local root = target.Character.HumanoidRootPart
+    local velocity = root.Velocity
+    local ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+    
+    local currentPred = getgenv().Prediction
+    for _, entry in ipairs(PingTable) do
+        if ping >= entry.Ping then
+            currentPred = entry.Prediction
+        end
+    end
+    
+    return root.Position + (velocity * currentPred)
+end
+
+-- // Targeting Logic
+local target = nil
+local function getClosestPlayer()
+    local closest = nil
+    local maxDist = getgenv().Radius
+    local pointer = getPointer()
+
     for _, v in pairs(game.Players:GetPlayers()) do
-        if v ~= client and v.Character and v.Character:FindFirstChild("Humanoid") and not isPlayerKoed(v) then
-            local rootPart = v.Character:FindFirstChild("HumanoidRootPart")
-            if rootPart then
-                local screenPos, Visible = camera:WorldToViewportPoint(rootPart.Position)
-                if Visible then
-                    local distToCenter = (Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2) - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
-                    if distToCenter < closestDistance and wallCheck(rootPart.Position, {client, v.Character}) then
-                        closestPlayer = v
-                        closestDistance = distToCenter
-                    end
+        if v ~= client and isAlive(v) and v.Character:FindFirstChild("HumanoidRootPart") then
+            local root = v.Character.HumanoidRootPart
+            local screenPos, onScreen = camera:WorldToViewportPoint(root.Position)
+            
+            if onScreen then
+                local dist = (pointer - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                if dist < maxDist and isVisible(root) then
+                    closest = v
+                    maxDist = dist
                 end
             end
         end
     end
-    target = closestPlayer
+    return closest
 end
 
-local aimingMethod = function(player)
-    if not player or not player.Character then return end
-    local velocity = Resolvedvelocity or player.Character.HumanoidRootPart.Velocity
-    local isJumping = player.Character.HumanoidRootPart.Velocity.Y > 0 and
-                        (player.Character.Humanoid:GetState() == Enum.HumanoidStateType.Freefall or
-                        player.Character.Humanoid:GetState() == Enum.HumanoidStateType.Jumping)
-    local Position = isJumping and (player.Character.LowerTorso.Position + Vector3.new(0, getgenv().Diameter, 0)) or player.Character.HumanoidRootPart.Position
-    local current = player.Character.HumanoidRootPart.Position
-    local result = current:Lerp(Position, getgenv().JumpSmoothness)
-    return result + velocity * getgenv().Prediction
-end
-
-game:GetService("RunService").RenderStepped:Connect(function()
-    if silentAim then
-        lockOnToNearestPlayer()
-    end
-    if resolver and target ~= nil then
-        Resolvedvelocity = recalculatedVelocity(target.Character.HumanoidRootPart)
-    else
-        Resolvedvelocity = nil
-    end
-    if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") and client.Character and client.Character:FindFirstChild("HumanoidRootPart") then
-        local targetRoot = target.Character.HumanoidRootPart
-        local myRoot = client.Character.HumanoidRootPart
-        local startPos, startVisible = camera:WorldToViewportPoint(myRoot.Position)
-        local endPos, endVisible = camera:WorldToViewportPoint(targetRoot.Position)
-        if startVisible and endVisible then
-            Tracer.From = Vector2.new(startPos.X, startPos.Y)
-            Tracer.To = Vector2.new(endPos.X, endPos.Y)
+-- // Loop
+RunService.RenderStepped:Connect(function()
+    local pointer = getPointer()
+    
+    FOVCircle.Visible = true
+    FOVCircle.Position = pointer
+    FOVCircle.Radius = getgenv().Radius
+    
+    target = getClosestPlayer()
+    
+    -- Tracer strictly to HumanoidRootPart
+    if target and target.Character:FindFirstChild("HumanoidRootPart") then
+        local root = target.Character.HumanoidRootPart
+        local targetPos, onScreen = camera:WorldToViewportPoint(root.Position)
+        
+        if onScreen then
             Tracer.Visible = true
+            Tracer.From = pointer
+            Tracer.To = Vector2.new(targetPos.X, targetPos.Y)
         else
             Tracer.Visible = false
         end
@@ -153,36 +142,22 @@ game:GetService("RunService").RenderStepped:Connect(function()
     end
 end)
 
+-- // Hit Event
 local function onToolActivated()
-    if target then
-        local position = aimingMethod(target)
-        game.ReplicatedStorage.MAINEVENT:FireServer("MOUSE", position)
+    if target and isAlive(target) then
+        local pos = getCalculatedPos(target)
+        game.ReplicatedStorage.MAINEVENT:FireServer("MOUSE", pos)
     end
 end
 
-local function onCharacterAdded(character)
-    character.DescendantAdded:Connect(function(descendant)
-        if descendant:IsA("Tool") then
-            descendant.Activated:Connect(onToolActivated)
+-- // Tool Detection
+local function setupTool(char)
+    char.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") then
+            child.Activated:Connect(onToolActivated)
         end
     end)
 end
 
-game.Players.LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
-if game.Players.LocalPlayer.Character then
-    onCharacterAdded(game.Players.LocalPlayer.Character)
-end
-
-local function easing(t)
-    return 1 - (1 - t) * (1 - t) * (1 - t)
-end
-
-game:GetService("RunService").Heartbeat:Connect(function()
-    if aiming and target ~= nil then
-        local position = aimingMethod(target)
-        local lookAt = CFrame.new(camera.CFrame.Position, position)
-        local new = camera.CFrame:Lerp(lookAt, easing(getgenv().Smoothing))
-        camera.CFrame = new
-    end
-end)
-
+client.CharacterAdded:Connect(setupTool)
+if client.Character then setupTool(client.Character) end
